@@ -1,76 +1,99 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import os
-import sys
+from flask import Flask, render_template, request, jsonify
+import google.generativeai as genai
+from pymongo import MongoClient
 
-# Ensure project root is in Python path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from backend.model import MemeRecommendationModel
-
+# Initialize Flask app
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
 
-# Initialize the meme recommendation model
-meme_model = MemeRecommendationModel()
+# Configure Google Generative AI
+genai.configure(api_key="AIzaSyC9vQK42erx2idQ6HjLVkh0_aDX3VNiIbs")
+
+# MongoDB connection string
+MONGO_URI = "mongodb+srv://chiragprao2004:FHhfSh9LRY5xCWLt@cluster0.668wx.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+
+# MongoDB connection
+client = MongoClient(MONGO_URI)
+db = client['SentimentDB']
+collection = db['SentimentCollection']
 
 
-@app.route('/recommend_meme', methods=['POST'])
-def recommend_meme():
-    """
-    Endpoint to get meme recommendations based on conversation context
-    """
+# Routes
+
+@app.route('/')
+def landing_page():
+    """Landing page route"""
+    return render_template('landing.html')
+
+
+@app.route('/recommender.html')
+def meme_recommender():
+    """Recommender page route"""
+    return render_template('recommender.html')
+
+
+@app.route('/generate', methods=['POST'])
+def generate():
+    """Generate meme recommendations"""
     try:
-        # Get conversation from request
-        data = request.json
-        conversation = data.get('conversation', '')
+        input_text = request.form.get('input_text')
+        if not input_text:
+            return jsonify({'error': 'Input text is required.'}), 400
 
-        if not conversation:
-            return jsonify({
-                'error': 'No conversation provided',
-                'status': 400
-            }), 400
+        # Sentiment classification
+        sentiments = ai_generator(input_text)
 
-        # Get meme recommendations
-        recommended_memes = meme_model.recommend_memes(conversation)
+        # Fetch and rank Image_URLs based on sentiments
+        image_urls = fetch_ranked_image_urls(sentiments)
 
-        return jsonify({
-            'recommended_memes': recommended_memes,
-            'status': 200
-        }), 200
+        return jsonify({'sentiments': sentiments, 'image_urls': image_urls})
 
     except Exception as e:
-        return jsonify({
-            'error': str(e),
-            'status': 500
-        }), 500
+        return jsonify({'error': str(e)}), 500
 
 
-@app.route('/train_model', methods=['POST'])
-def train_model():
-    """
-    Endpoint to retrain or update the meme recommendation model
-    """
+# Helper Functions
+
+def ai_generator(input_text):
+    """Generates sentiment classifications using Google Gemini AI."""
     try:
-        # Trigger model retraining
-        meme_model.train()
-
-        return jsonify({
-            'message': 'Model successfully retrained',
-            'status': 200
-        }), 200
-
+        model = genai.GenerativeModel("gemini-1.5-pro")
+        response = model.generate_content(
+            f"""classify the below text into Joyful,Sad,Angry,Fearful,Surprised,Disgusted,Confident,Nostalgic,
+            Sarcastic,Excited,Bored,Anxious,Content,Motivated,Romantic,Frustrated,Jealous,Grateful,Curious,Embarrassed 
+            if there are multiple also add it, just only respond with the classified keyword and nothing else or else the app will crash 
+            {input_text}"""
+        )
+        classified_sentiments = response.text.strip()
+        return classified_sentiments.split(",")  # Split multiple sentiments into a list
     except Exception as e:
-        return jsonify({
-            'error': str(e),
-            'status': 500
-        }), 500
+        raise RuntimeError(f"AI generator error: {str(e)}")
 
 
+def fetch_ranked_image_urls(input_sentiments):
+    """Fetches and ranks image URLs from the database based on sentiment matches."""
+    try:
+        input_sentiments = [sentiment.strip().lower() for sentiment in input_sentiments]
+        results = collection.find({}, {"Image_URL": 1, "Sentimental": 1, "_id": 0})
+
+        ranked_results = []
+        for result in results:
+            sentimental_value = result.get("Sentimental", "")
+            if not isinstance(sentimental_value, str):
+                continue  # Skip documents where Sentimental is not a string
+
+            doc_sentiments = [s.strip().lower() for s in sentimental_value.split(",")]
+            match_count = len(set(input_sentiments) & set(doc_sentiments))
+            if match_count > 0:
+                ranked_results.append({"Image_URL": result.get("Image_URL"), "match_count": match_count})
+
+        ranked_results.sort(key=lambda x: x["match_count"], reverse=True)
+        top_results = ranked_results[:5]
+
+        return [result['Image_URL'] for result in top_results]
+    except Exception as e:
+        raise RuntimeError(f"Database query error: {str(e)}")
+
+
+# Main entry point
 if __name__ == '__main__':
-    # Ensure necessary directories exist
-    os.makedirs('meme_database', exist_ok=True)
-    os.makedirs('model_checkpoints', exist_ok=True)
-
-    # Run the Flask app
-    app.run(debug=True, port=5000)
+    app.run(debug=True)
